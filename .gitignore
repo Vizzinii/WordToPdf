@@ -1,0 +1,40 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- PyInstaller ---
+*.spec
+
+# --- Runtime artefacts produced by the tool ---
+# Interim PDFs, deliverables and diagnostics must never be committed.
+*.part
+*.moving
+*_优化保真版.pdf
+*_导出稿.pdf
+.__wps_*.tmp.pdf
+转换记录.csv
+pdf_tool_selftest.log
+
+# --- Test material ---
+# Source documents and their exports are customer data; keep them out.
+*.docx
+*.doc
+*.xlsx
+!docs/**/*.docx
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store

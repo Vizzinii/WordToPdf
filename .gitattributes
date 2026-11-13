@@ -1,0 +1,18 @@
+# Normalise line endings: LF in the repository on every platform.
+# These are text sources; CRLF in them only causes noisy diffs.
+* text=auto eol=lf
+
+# Windows PowerShell scripts
+*.ps1 text eol=lf
+
+# Source and docs
+*.py    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+
+# Binary artefacts (never convert)
+*.exe   binary
+*.pdf   binary
+*.docx  binary
+*.png   binary
+*.jpg   binary
