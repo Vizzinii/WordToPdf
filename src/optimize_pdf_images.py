@@ -78,8 +78,11 @@ DO NOT change these --g4 parameters either: /CCITTFaxDecode requires
     multi-strip TIFF streams decode with shifted rows. Word TIFFs are usually
     multi-strip, so g4_bilevel() decodes to a bitmap and re-encodes one strip.
 
-Matching: group by pixel size, then compare 16x16 grayscale fingerprints;
-          candidates farther than DIST_THRESHOLD are left untouched.
+Matching: group by pixel size, then compare a 16x16 grayscale fingerprint and
+          confirm with a 32x32 one. A candidate must clear BOTH gates to be
+          used; anything else leaves the exported image untouched. A loose
+          single gate here does not merely cost bytes - it silently swaps in a
+          different picture that happens to share the pixel size.
 
 Memory: only an index (filename + fingerprint) of Word images is kept in RAM.
         Original bytes are read on demand from the docx, one image at a time.
@@ -104,7 +107,19 @@ from PIL import Image
 
 warnings.filterwarnings("ignore")
 
-DIST_THRESHOLD = 12.0
+# Matching gates. Two fingerprints are used: a coarse 16x16 one for the bucket
+# scan, and a fine 32x32 one as confirmation. Measured on the 2,865-page
+# reference report (8,401 PDF image objects, 8,356 Word images):
+#   legitimate matches   -> 16x16 distance 0.03 .. 0.34   (nothing between 1 and 4)
+#   wrong same-size twin -> 16x16 distance 6.87 .. 9.71
+# The old single gate of 12.0 accepted every one of those wrong twins, which is
+# how pages 39/40/46/47/55 ended up carrying a different image of the same pixel
+# size. A budget is never a reason to accept a *different picture*: a rejected
+# match only means "keep what Word exported", a wrong match silently rewrites
+# page content. So the accept gate is deliberately far below the error band.
+DIST_ACCEPT = 1.0          # 16x16: only near-identical fingerprints pass
+DIST_ACCEPT_FINE = 3.0     # 32x32: confirmation pass on the accepted candidate
+DIST_THRESHOLD = 12.0      # reporting only; never used to accept a match
 PROGRESS_EVERY = 200
 ZLIB_LEVEL = 9
 
@@ -132,6 +147,7 @@ STAT_LABELS = {
     "indexed_4bpp": "索引图转 4bpp",
     "rgb_flate": "真彩无损转 Flate",
     "kept_dct_smaller": "原 JPEG 更小保留",
+    "no_original": "无可靠同尺寸原图，保留导出图",
     "kept": "保留原样",
     "mem_skipped": "内存不足跳过",
 }
@@ -270,14 +286,27 @@ def labelled(d, labels):
     return str(dict(d))
 
 
+FP_COARSE = 16
+FP_FINE = 32
+
+
 def fingerprint(im):
-    return bytes(im.convert("L").resize((16, 16),
+    """16x16 grayscale fingerprint: cheap scan of one pixel-size bucket."""
+    return bytes(im.convert("L").resize((FP_COARSE, FP_COARSE),
+                                        Image.Resampling.BILINEAR).tobytes())
+
+
+def fingerprint_fine(im):
+    """32x32 grayscale fingerprint: confirmation pass for an accepted match."""
+    return bytes(im.convert("L").resize((FP_FINE, FP_FINE),
                                         Image.Resampling.BILINEAR).tobytes())
 
 
 def distance(a, b):
-    """Mean absolute difference of two 256-byte fingerprints, scaled to 0..255."""
-    return sum(map(abs, map(sub, a, b))) / 256.0
+    """Mean absolute difference of two same-length fingerprints, scale 0..255."""
+    if not len(a):
+        return 255.0
+    return sum(map(abs, map(sub, a, b))) / float(len(a))
 
 
 def distance_capped(a, b, cap):
@@ -286,49 +315,57 @@ def distance_capped(a, b, cap):
     Element differences are non-negative, so a running sum above the cap proves
     the final value is above it as well. Returns cap + 1 on early exit.
     """
+    if not len(a):
+        return 255.0
     total = 0
-    limit = cap * 256.0
+    limit = cap * len(a)
     for x, y in zip(a, b):
         total += x - y if x > y else y - x
         if total > limit:
             return cap + 1.0
-    return total / 256.0
+    return total / float(len(a))
 
 
-def best_match(fp, candidates, threshold=None):
-    """Return (best_candidate, best_distance) in one pass over the bucket.
+def best_match(fp, candidates, fp_fine=None, threshold=None):
+    """Return (candidate, distance) only for a *trustworthy* match.
 
-    A candidate is accepted when its distance is <= threshold, matching the
-    original `distance(...) > DIST_THRESHOLD` test exactly; comparing with `<`
-    here silently dropped matches that sat precisely on the threshold.
+    Two gates: the coarse 16x16 fingerprint must come within DIST_ACCEPT, and,
+    when a fine fingerprint is available on both sides, the 32x32 one must
+    confirm it within DIST_ACCEPT_FINE. A candidate that clears the bucket scan
+    but fails confirmation is rejected and the caller keeps the exporter's own
+    image. Rejecting costs bytes; accepting a look-alike silently swaps the
+    picture on a page.
     """
-    if threshold is None:
-        threshold = DIST_THRESHOLD
+    cap = DIST_ACCEPT if threshold is None else threshold
     best = None
-    best_d = threshold
+    best_d = cap
     for cand in candidates:
         d = distance_capped(fp, cand["fp"], best_d)
         if d > best_d:
             continue
-        # Accept ties (<= threshold) but never replace an equal-best candidate:
-        # `min()` returns the FIRST minimum, and picking a different one on a
-        # tie means back-filling a different image of the same size.
+        # Accept ties (<= cap) but never replace an equal-best candidate:
+        # picking a different one on a tie means back-filling a different
+        # image of the same size.
         if best is None or d < best_d:
             best_d = d
             best = cand
-            # Only an exact fingerprint match may stop the scan. An earlier
-            # version broke out at d <= 0.5, which on scanned text (typical
-            # distances 0.015-0.02) fired on the FIRST candidate and silently
-            # kept a worse image than min() would have chosen.
             if d == 0:
                 break
+    if best is None:
+        return None, best_d
+    if fp_fine and best.get("fp2"):
+        fine = distance_capped(fp_fine, best["fp2"], DIST_ACCEPT_FINE)
+        if fine > DIST_ACCEPT_FINE:
+            # Same coarse shape, different actual picture: this is exactly the
+            # look-alike case that corrupted pages 39/40/46/47/55.
+            return None, best_d
     return best, best_d
 
 
 def inspect_bytes(raw):
-    """Read only size and fingerprint; the decoded bitmap is released at once."""
+    """Read only size and both fingerprints; the bitmap is released at once."""
     with Image.open(io.BytesIO(raw)) as im:
-        return (im.width, im.height), fingerprint(im)
+        return (im.width, im.height), fingerprint(im), fingerprint_fine(im)
 
 
 def build_word_index(docx_path):
@@ -342,7 +379,7 @@ def build_word_index(docx_path):
                 continue
             try:
                 raw = archive.read(name)
-                size, fp = inspect_bytes(raw)
+                size, fp, fp2 = inspect_bytes(raw)
             except MemoryError:
                 emit("  内存紧张，跳过一张 Word 图片索引",
                      "  Low memory: skipped one Word image index")
@@ -350,13 +387,13 @@ def build_word_index(docx_path):
             except Exception:
                 continue
             # No deduplication here. Two Word images can occupy the same pixel
-            # size with fingerprints inside DIST_THRESHOLD of each other, and
-            # collapsing those buckets made one of them back-fill the other's
-            # bytes (measured: a 90 KB JPEG came out byte-identical to a
-            # different image). A dict keyed by (size, fingerprint) is unsafe;
-            # an exact-byte key would be safe but saves indexing time only,
-            # which the progress numbers show is a fraction of a second.
-            entry = {"name": name, "fp": fp}
+            # size with coarse fingerprints inside the accept gate of each
+            # other, and collapsing those buckets made one of them back-fill the
+            # other's bytes (measured: a 90 KB JPEG came out byte-identical to a
+            # different image). The fine fingerprint in `best_match` is what
+            # separates them now; deduplicating would hide the second candidate
+            # from that comparison.
+            entry = {"name": name, "fp": fp, "fp2": fp2}
             grouped[size].append(entry)
             count += 1
             if count % 1000 == 0:
@@ -648,7 +685,7 @@ def _encode_one(doc, xref, word, archive, use_g4):
     except Exception:
         return xref, None, "kept"
     try:
-        _, fp = inspect_bytes(extracted)
+        _, fp, fp_fine = inspect_bytes(extracted)
     except MemoryError:
         return xref, None, "mem_skipped"
     except Exception:
@@ -656,10 +693,15 @@ def _encode_one(doc, xref, word, archive, use_g4):
     del extracted
     candidates = word.get((width, height))
     if not candidates:
-        return xref, None, "kept"
-    best, best_d = best_match(fp, candidates)
+        return xref, None, "no_original"
+    best, best_d = best_match(fp, candidates, fp_fine)
     if best is None:
-        return xref, None, "kept"
+        # The bucket has images of the same pixel size, but none of them is
+        # this picture: the exporter resampled or cropped it, so the original
+        # is not in the bucket at all. Back-filling the closest look-alike is
+        # what swapped a test-report scan for an unrelated certificate on
+        # pages 39/40/46/47/55. Keep what the exporter produced instead.
+        return xref, None, "no_original"
     try:
         if doc.xref_get_key(xref, "ImageMask")[1] == "true":
             return xref, None, "kept"
@@ -940,6 +982,80 @@ def verify_render(pdf_path, out_path, sample_pages=12):
     finally:
         src.close()
         out.close()
+
+
+def verify_all_pages(pdf_path, out_path, scale=0.12, gross_tol=9.0,
+                     gross_frac=0.08, soft_tol=4.5, soft_frac=0.015,
+                     cancel=None, progress=None):
+    """Render EVERY page of both PDFs and diff them; return the flagged pages.
+
+    Cost is tiny because the pages are rendered small: measured 17.8 s for
+    2,865 pages at scale 0.12.
+
+    Two tiers, because this audit cannot tell "same picture, sharper" from
+    "different picture" by pixel totals alone - both land near mean 6 on real
+    scans:
+      * GROSS  (mean > gross_tol or frac > gross_frac): layout damage, a blank
+        or shifted page, an inverted or broken stream. Blocks delivery.
+      * SOFT   (above soft_tol): usually the sharpness difference between the
+        exporter's smoothed JPEG and the lossless original that replaced it,
+        which is the intended result. Reported for the log only.
+    The real guard against a wrong *pick* is DIST_ACCEPT / DIST_ACCEPT_FINE in
+    `best_match`, because a look-alike swap looks exactly like a legitimate
+    back-fill once it is in the file.
+
+    Returns (checked, gross, soft) with each list holding
+    (page_number, mean_delta, frac_moved).
+    """
+    src = pymupdf.open(pdf_path)
+    out = pymupdf.open(out_path)
+    gross, soft = [], []
+    checked = 0
+    try:
+        n = min(src.page_count, out.page_count)
+        matrix = pymupdf.Matrix(scale, scale)
+        for i in range(n):
+            if cancel is not None and cancel.is_set():
+                break
+            try:
+                a = src[i].get_pixmap(matrix=matrix, colorspace=pymupdf.csGRAY,
+                                      alpha=False)
+                b = out[i].get_pixmap(matrix=matrix, colorspace=pymupdf.csGRAY,
+                                      alpha=False)
+            except Exception:
+                continue
+            checked += 1
+            if (a.width, a.height) != (b.width, b.height):
+                gross.append((i + 1, 255.0, 1.0))
+                continue
+            sa, sb = a.samples, b.samples
+            if sa == sb:
+                del a
+                del b
+                continue
+            total = 0
+            moved = 0
+            count = len(sa)
+            for x, y in zip(sa, sb):
+                d = x - y if x > y else y - x
+                total += d
+                if d > 40:
+                    moved += 1
+            mean = total / float(count)
+            frac = moved / float(count)
+            row = (i + 1, round(mean, 2), round(frac, 4))
+            if mean > gross_tol or frac > gross_frac:
+                gross.append(row)
+            elif mean > soft_tol or frac > soft_frac:
+                soft.append(row)
+            if progress is not None and (i + 1) % 500 == 0:
+                progress(i + 1, n)
+            del a
+            del b
+    finally:
+        src.close()
+        out.close()
+    return checked, gross, soft
 
 
 def verify(pdf_path, out_path, image_pages=20, render_check=False,

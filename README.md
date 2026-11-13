@@ -27,7 +27,9 @@ Word 平铺导出    1259.72 MB
 src/
   pdf_tool.py              主程序：GUI（Win32/ctypes）、三种处理模式、调度、合并
   wps_to_pdf.py            导出层：WPS COM / WPS CLI / Microsoft Word COM
-  optimize_pdf_images.py   优化层：原图回填、无损重编码、完整性校验
+  optimize_pdf_images.py   优化层：原图回填、无损重编码、完整性校验、逐页渲染审计
+dist/
+  WordToPdfTool.exe        已打包的单文件可执行程序（V1.3.4，免 Python 环境）
 docs/
   使用说明.md               完整使用文档（含原理、限制、实测数据、版本变更）
   代码评审报告.md           对 V1.2 的代码评审（问题清单与改进依据）
@@ -40,6 +42,12 @@ requirements.txt
 LICENSE
 .gitignore
 ```
+
+## 版本要点
+
+**V1.3.4 修正了一处会静默改错页面内容的缺陷**：V1.3.3 及更早版本按「同像素尺寸 + 指纹距离 ≤ 12」挑选 Word 原图回填，当同尺寸桶里存在无关插图时，会把页面图片换成**另一张同尺寸的图**（实测一份 2,865 页文档有 5 页中招），而画质复核因为用同一套判据对照，始终报告「一致」。
+
+现改为双指纹双闸门（粗 16×16 ≤ 1.0 且细 32×32 ≤ 3.0），任一门不过即保留导出图并单列 `no_original` 计数；同时新增**逐页渲染审计**，把导出稿与成品逐页渲染比对，发现结构性差异就不删除中间稿。全量复核：8,328 个合法匹配一个未丢，5 个错配全部拦下，改后页面与干净导出逐字节一致。
 
 ## 快速开始
 
@@ -81,6 +89,8 @@ python src\pdf_tool.py
 详细论证与实测数据见 [docs/使用说明.md](docs/使用说明.md) 第 11 节。
 
 ## 构建可执行文件
+
+现成产物：`dist\WordToPdfTool.exe`（V1.3.4，单文件，免 Python 环境，复制到任意 Windows 机器即可运行）。重新构建：
 
 ```powershell
 .\tools\build_exe.ps1

@@ -52,7 +52,7 @@ if sys.stderr is None:
 import wps_to_pdf as w2p
 import optimize_pdf_images as opt
 
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.3.4"
 APP_NAME = "WordToPdfTool"
 
 MAX_SIZE = 2 * 1024 * 1024 * 1024          # 2 GiB
@@ -829,19 +829,34 @@ def quality_check(out_pdf, docx, sample_pages=20, index=None):
                     if not candidates:
                         no_candidate += 1
                         continue
+                    # Which Word image is this object *supposed* to be? Decide
+                    # that FIRST. The old order compared raw bytes against every
+                    # candidate in the bucket and counted a hit as "identical",
+                    # so a wrongly back-filled look-alike also passed: its bytes
+                    # do belong to some Word image, just not to this page's.
+                    probe = Image.frombytes("RGB", (width, height), buf)
+                    fp = opt.fingerprint(probe)
+                    fp_fine = opt.fingerprint_fine(probe)
+                    del probe
+                    best, _ = opt.best_match(fp, candidates, fp_fine)
+                    if best is None:
+                        # No candidate is this picture: either the exporter
+                        # resampled/cropped it out of its size bucket, or the
+                        # only same-size images are look-alikes. The optimiser
+                        # therefore left this object exactly as exported, which
+                        # is not a quality regression to report.
+                        unmatched += 1
+                        continue
                     filt = doc.xref_get_key(xref, "Filter")[1]
                     stored = doc.xref_stream_raw(xref) or b""
                     if "DCTDecode" in filt:
+                        # Byte-exact proof, but only against the matched image.
                         raw = doc.extract_image(xref)["image"]
-                        matched = False
-                        for candidate in candidates:
-                            try:
-                                if archive.read(candidate["name"]) == raw:
-                                    matched = True
-                                    break
-                            except Exception:
-                                pass
-                        if matched:
+                        try:
+                            same_bytes = archive.read(best["name"]) == raw
+                        except Exception:
+                            same_bytes = False
+                        if same_bytes:
                             byte_identical += 1
                             identical += 1
                             continue
@@ -853,15 +868,6 @@ def quality_check(out_pdf, docx, sample_pages=20, index=None):
                     # (indexed, true-colour Flate, or keeping Word's own JPEG
                     # because it is smaller). Only a mismatch here means the
                     # delivered image really differs from the Word original.
-                    fp = opt.fingerprint(
-                        Image.frombytes("RGB", (width, height), buf))
-                    best, _ = opt.best_match(fp, candidates)
-                    if best is None:
-                        # No candidate passed DIST_THRESHOLD: the optimiser left
-                        # this object exactly as Word exported it, which is not a
-                        # quality regression to report.
-                        unmatched += 1
-                        continue
                     source = archive.read(best["name"])
                     smask = doc.xref_get_key(xref, "SMask")[1]
                     keep_alpha = smask not in ("null", "False", None)
@@ -882,7 +888,7 @@ def quality_check(out_pdf, docx, sample_pages=20, index=None):
                     # "retained" so the log stays honest about what happened,
                     # but do not block disposal of the interim PDF for it.
                     if expected["tag"] == "jpeg_passthrough" and \
-                            _stored_is_word_jpeg(archive, candidates, stored):
+                            _stored_is_word_jpeg(archive, [best], stored):
                         byte_identical += 1
                         identical += 1
                         continue
@@ -906,7 +912,7 @@ def quality_check(out_pdf, docx, sample_pages=20, index=None):
 
 
 def run_pipeline(docx, engine, sink, keep_pdf=False, progress=None, app=None,
-                 cancel=None):
+                 cancel=None, no_page_check=False):
     """Export + optimise + verify one document, then dispose of the interim PDF.
 
     `app` lets a batch reuse one hidden WPS instance instead of starting and
@@ -1060,6 +1066,38 @@ def run_pipeline(docx, engine, sink, keep_pdf=False, progress=None, app=None,
                     index[0].close()
                 except Exception:
                     pass
+
+        # Whole-document render audit. The object-level check above can only
+        # confirm "I wrote the stream I picked"; it cannot see that the pick
+        # itself was the wrong picture, because the same matcher decides both
+        # sides. Rendering every page of the export and of the deliverable and
+        # diffing them asks the question the object check cannot answer. Cheap:
+        # 17.8 s for 2,865 pages at 0.12 scale.
+        page_flagged = []
+        page_soft = []
+        page_checked = 0
+        if not no_page_check:
+            try:
+                sink("正在做整页渲染审计（逐页比对导出稿与成品）…")
+                page_checked, page_flagged, page_soft = opt.verify_all_pages(
+                    tmp, out, 0.12, cancel=cancel)
+                report["pages_checked"] = page_checked
+                report["pages_flagged"] = [p[0] for p in page_flagged]
+                report["pages_soft"] = [p[0] for p in page_soft]
+                if page_flagged:
+                    preview = "、".join(str(p[0]) for p in page_flagged[:20])
+                    more = "" if len(page_flagged) <= 20 else " 等"
+                    sink("整页渲染审计发现 %d 页出现结构性差异（第 %s%s 页），"
+                         "已保留导出稿供对照。"
+                         % (len(page_flagged), preview, more))
+                else:
+                    sink("整页渲染审计通过：%d 页无结构性差异。" % page_checked)
+                if page_soft:
+                    sink("另有 %d 页存在轻微渲染差异（多为导出时 JPEG 平滑与"
+                         "回填原图锐度之差，属预期）。" % len(page_soft))
+            except Exception as exc:
+                verify_ok = False
+                sink("整页渲染审计未完成：%s" % exc)
         progress(0.96, "校验完成")
 
         # Dispose of the interim PDF. A real pixel difference or an aborted
@@ -1075,6 +1113,10 @@ def run_pipeline(docx, engine, sink, keep_pdf=False, progress=None, app=None,
             reasons.append("完整性校验三项不一致")
         if pixel_diff > 0:
             reasons.append("画质复核存在 %d 张真实像素差异" % pixel_diff)
+        if page_flagged:
+            reasons.append("整页渲染审计有 %d 页结构性差异（第 %s 页）"
+                           % (len(page_flagged),
+                              "、".join(str(p[0]) for p in page_flagged[:10])))
         report["keep_reason"] = "；".join(reasons)
 
         if not reasons:
@@ -2280,6 +2322,15 @@ def selftest_merge(out, sources):
 # ----------------------------------------------------------------------- main
 def main():
     global HWND_MAIN
+    # Must run before any process pool is created: in a PyInstaller bundle the
+    # worker re-executes this module, and without this call every worker blocks
+    # forever, which is exactly how the packaged build hung on the first
+    # parallel run (935 s of 0% CPU, four idle children).
+    try:
+        import multiprocessing
+        multiprocessing.freeze_support()
+    except Exception:
+        pass
     if "--version" in sys.argv or "-V" in sys.argv:
         # Kept dependency-free and available before any Win32 work, so this
         # also answers "which build am I holding" for a packaged exe.
