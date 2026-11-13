@@ -28,8 +28,6 @@ src/
   pdf_tool.py              主程序：GUI（Win32/ctypes）、三种处理模式、调度、合并
   wps_to_pdf.py            导出层：WPS COM / WPS CLI / Microsoft Word COM
   optimize_pdf_images.py   优化层：原图回填、无损重编码、完整性校验、逐页渲染审计
-dist/
-  WordToPdfTool.exe        已打包的单文件可执行程序（V1.3.4，免 Python 环境）
 docs/
   使用说明.md               完整使用文档（含原理、限制、实测数据、版本变更）
   代码评审报告.md           对 V1.2 的代码评审（问题清单与改进依据）
@@ -90,11 +88,12 @@ python src\pdf_tool.py
 
 ## 构建可执行文件
 
-现成产物：`dist\WordToPdfTool.exe`（V1.3.4，单文件，免 Python 环境，复制到任意 Windows 机器即可运行）。重新构建：
-
 ```powershell
 .\tools\build_exe.ps1
 ```
+
+产物：`dist\WordToPdfTool.exe`（单文件，免 Python 环境，复制到任意装了 WPS/Office 的 Windows 机器即可运行）。
+`dist` 与 `build` 目录不入库（体积过大且为可再生产物），需要发布包时按上表构建后用 `Compress-Archive` 打包即可。
 
 产物为单文件 `WordToPdfTool.exe`。构建后建议跑一次自测：
 
