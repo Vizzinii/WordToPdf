@@ -2,7 +2,7 @@
 """
 pdf_tool.py -- Word/PDF 一体化小工具（可打包为单个 exe）。
 
-V1.3 能力：
+V1.3.3 能力：
   ① 单个 Word 文档 -> 最终优化保真版 PDF；
   ② 整个文件夹批量转换 -> 每个 Word 各自输出最终 PDF（可选自动合并）；
   ③ 多个 PDF 按列表顺序合并为 1 个 PDF（顺序可上移/下移调整）。
@@ -17,6 +17,7 @@ V1.3 能力：
 「保留中间 PDF」与「批量完成后自动合并结果 PDF」复选框。
 
 命令行自测（打包后亦可用）：
+    pdf_tool.py --version                         打印版本后退出
     pdf_tool.py --selftest <path.docx|folder> [wps|cli|word] [keep]
     pdf_tool.py --selftest-merge <out.pdf> <p1.pdf> <p2.pdf> ...
 结果写入系统临时目录 pdf_tool_selftest.log。
@@ -50,6 +51,9 @@ if sys.stderr is None:
 
 import wps_to_pdf as w2p
 import optimize_pdf_images as opt
+
+APP_VERSION = "1.3.3"
+APP_NAME = "WordToPdfTool"
 
 MAX_SIZE = 2 * 1024 * 1024 * 1024          # 2 GiB
 CLI_MAX_SIZE = 200 * 1024 * 1024           # official wpscli hard limit
@@ -2276,6 +2280,24 @@ def selftest_merge(out, sources):
 # ----------------------------------------------------------------------- main
 def main():
     global HWND_MAIN
+    if "--version" in sys.argv or "-V" in sys.argv:
+        # Kept dependency-free and available before any Win32 work, so this
+        # also answers "which build am I holding" for a packaged exe.
+        frozen = getattr(sys, "frozen", False)
+        print("%s %s" % (APP_NAME, APP_VERSION))
+        print("python %s" % sys.version.split()[0])
+        print("frozen: %s" % ("yes" if frozen else "no"))
+        try:
+            import pymupdf
+            print("pymupdf %s" % pymupdf.__version__)
+        except Exception as exc:
+            print("pymupdf unavailable (%s)" % exc)
+        try:
+            import PIL
+            print("pillow %s" % PIL.__version__)
+        except Exception as exc:
+            print("pillow unavailable (%s)" % exc)
+        return 0
     if "--selftest" in sys.argv:
         i = sys.argv.index("--selftest")
         target = sys.argv[i + 1] if len(sys.argv) > i + 1 else ""
@@ -2319,7 +2341,7 @@ def main():
     popup(hwnd, MAIN_W, MAIN_H)
     HWND_MAIN = hwnd
     append_log_lines([
-        "工具已就绪｜V1.3",
+        "工具已就绪｜V%s" % APP_VERSION,
         "支持：单个 Word → 最终 PDF；整个文件夹批量；多个 PDF 按选择顺序合并。",
         "请选择处理模式后点击主按钮；处理过程与结果会持续记录在本日志中。",
         "提示：右上角「?」可查看使用方法、原理与选项说明。",
