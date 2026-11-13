@@ -34,7 +34,8 @@ docs/
   改进建议_V1.3.md          改进项的技术论证与验证过程
 tools/
   build_exe.ps1             PyInstaller 打包脚本
-  selftest.ps1              回归自测入口
+  selftest.ps1             回归自测（PowerShell 版）
+  selftest.py              回归自测（跨平台版，不依赖执行策略）
 requirements.txt
 LICENSE
 .gitignore
@@ -85,7 +86,18 @@ python src\pdf_tool.py
 .\tools\build_exe.ps1
 ```
 
-产物为单文件 `WordToPdfTool.exe`。构建后建议跑一次 `.\tools\selftest.ps1`。
+产物为单文件 `WordToPdfTool.exe`。构建后建议跑一次自测：
+
+```powershell
+# PowerShell 版（若执行策略受限，用 python 版）
+.\tools\selftest.ps1 -Sample "A.docx" -Engine word
+
+# 跨平台版，不依赖 PowerShell 执行策略
+python tools\selftest.py "A.docx" --engine word
+```
+
+自测会真实转换一份文档，并断言：产出 PDF 存在、页数非零、中间 PDF 已清理、
+画质复核像素差异为 0。
 
 ## 运行环境与依赖
 

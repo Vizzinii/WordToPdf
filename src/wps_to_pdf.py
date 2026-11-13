@@ -599,28 +599,38 @@ def self_check(engine, visible=False):
                  "  Test DOCX creation failed (PDF export unaffected): %s"
                  % com_message(exc))
             docx = None
-        try:
-            doc.Close(WD_DO_NOT_SAVE_CHANGES)
-        except Exception:
-            pass
         if docx and os.path.exists(docx):
+            # Do NOT close this document first. Closing the last open document
+            # tears down the automation session in some Word/WPS builds
+            # ("RPC 服务器不可用" / `<unknown>.Open`), so the follow-up Open
+            # fails. Close after opening the file instead.
             size, pages, used, _ = export_doc(app, docx, pdf, 60, False, True)
             emit("  导出接口：%s；PDF %d 字节 / %d 页" % (used, size, pages),
                  "  Export method: %s; PDF %d bytes / %d pages"
                  % (used, size, pages))
-        else:
-            doc2 = app.Documents.Add()
-            doc2.Content.Text = "WPS automation self-test 2026"
-            doc2.ExportAsFixedFormat(pdf, EXPORT_FORMAT_PDF)
-            size = wait_for_file(pdf, 60)
-            emit("  导出接口：ExportAsFixedFormat；PDF %d 字节 / %d 页"
-                 % (size, pdf_info(pdf)),
-                 "  Export method: ExportAsFixedFormat; PDF %d bytes / %d pages"
-                 % (size, pdf_info(pdf)))
             try:
-                doc2.Close(WD_DO_NOT_SAVE_CHANGES)
+                doc.Close(WD_DO_NOT_SAVE_CHANGES)
             except Exception:
                 pass
+            doc = None
+        else:
+            # No test docx on disk, so export the blank document directly.
+            # The first document must still be open here: closing the last
+            # document makes Word's late-bound `Documents` collection unusable
+            # and `Documents.Add()` then fails with `<unknown>.Add`.
+            doc.Content.Text = "WPS automation self-test 2026"
+            doc.ExportAsFixedFormat(pdf, EXPORT_FORMAT_PDF)
+            size = wait_for_file(pdf, 60)
+            pages = pdf_info(pdf)
+            emit("  导出接口：ExportAsFixedFormat；PDF %d 字节 / %d 页"
+                 % (size, pages),
+                 "  Export method: ExportAsFixedFormat; PDF %d bytes / "
+                 "%d pages" % (size, pages))
+            try:
+                doc.Close(WD_DO_NOT_SAVE_CHANGES)
+            except Exception:
+                pass
+            doc = None
         emit("  自检通过：WPS COM 自动化可用，导出 PDF 有效。",
              "  Self-test passed: WPS COM automation is functional.")
     except Exception as exc:
