@@ -526,6 +526,110 @@ def export_doc(app, src, dst, timeout, page_check=True, overwrite=False):
                 pass
 
 
+SHEET_PROGIDS = ("KET.Application", "Ket.Application", "Excel.Application")
+
+
+def start_sheet_app(visible=False):
+    """表格组件是另一个 COM 服务，不能用 KWps.Application 开 Workbooks。
+
+    实测 `KWps.Application.Workbooks` 直接抛 AttributeError：文字组件没有表格
+    对象模型。WPS 表格注册的是 KET.Application（大小写两种写法都存在）。
+    """
+    import win32com.client as win32
+    errors = []
+    for progid in SHEET_PROGIDS:
+        try:
+            app = win32.DispatchEx(progid)
+        except Exception as exc:
+            errors.append("%s: %s" % (progid, com_message(exc)))
+            continue
+        for attr, value in (("Visible", visible), ("DisplayAlerts", 0)):
+            try:
+                setattr(app, attr, value)
+            except Exception:
+                pass
+        emit("已连接表格自动化实例：%s" % progid,
+             "Connected spreadsheet automation: %s" % progid)
+        return app
+    raise RuntimeError("无法启动 WPS 表格 / Excel 自动化实例：%s"
+                       % " | ".join(errors))
+
+
+def quit_sheet_app(app):
+    if app is None:
+        return
+    try:
+        app.Quit()
+    except Exception:
+        pass
+
+
+def export_xlsx(app, src, dst, timeout, overwrite=False):
+    """把一个 .xlsx 导出为 PDF；返回 (字节数, 页数)。
+
+    表格走的是另一套 COM 对象（Workbooks，不是 Documents），导出方法是
+    ExportAsFixedFormat，且必须把 PrintArea / 页面设置交给表格自己决定——
+    这里不改任何页面设置，只要求「按当前工作表原样输出」。
+    """
+    src = os.path.abspath(src)
+    dst = os.path.abspath(dst)
+    if not os.path.isfile(src):
+        raise FileNotFoundError("找不到表格文件：%s" % src)
+    if os.path.exists(dst) and not overwrite:
+        raise FileExistsError(
+            "输出文件已存在（未覆盖，可加 --overwrite）：%s" % dst)
+    parent = os.path.dirname(dst)
+    if parent and not os.path.isdir(parent):
+        os.makedirs(parent, exist_ok=True)
+    partial = dst + ".partial.pdf"
+    if os.path.exists(partial):
+        os.remove(partial)
+    book = None
+    try:
+        book = app.Workbooks.Open(src, False, True)
+        used = None
+        errors = []
+        for name, call in (
+            ("ExportAsFixedFormat",
+             lambda p: book.ExportAsFixedFormat(0, p)),
+            ("ExportAsFixedFormat-active",
+             lambda p: book.ActiveSheet.ExportAsFixedFormat(0, p)),
+        ):
+            for attempt in range(EXPORT_RETRIES + 1):
+                try:
+                    call(partial)
+                    used = name
+                    break
+                except Exception as exc:
+                    if attempt < EXPORT_RETRIES and is_transient(exc):
+                        time.sleep(RETRY_DELAY)
+                        continue
+                    errors.append("%s: %s" % (name, com_message(exc)))
+                    break
+            if used is not None:
+                break
+        if used is None:
+            raise RuntimeError("WPS 表格未提供可用的 PDF 导出接口：%s"
+                               % " | ".join(errors))
+        size = wait_for_file(partial, timeout)
+        pages = pdf_info(partial)
+        if pages <= 0:
+            raise RuntimeError("导出的 PDF 页数为 0，文件可能损坏")
+        os.replace(partial, dst)
+        return size, pages
+    finally:
+        if book is not None:
+            try:
+                book.Close(False)
+            except Exception:
+                pass
+        if os.path.exists(partial):
+            try:
+                os.remove(partial)
+            except OSError:
+                pass
+
+
 def run_optimizer(docx, pdf, out, args):
     if _opt is None:
         raise RuntimeError(

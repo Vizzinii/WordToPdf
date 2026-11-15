@@ -53,7 +53,7 @@ import wps_to_pdf as w2p
 import optimize_pdf_images as opt
 import link_fix
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 APP_NAME = "WordToPdfTool"
 
 MAX_SIZE = 2 * 1024 * 1024 * 1024          # 2 GiB
@@ -1358,8 +1358,14 @@ def pdf_pages(path):
         doc.close()
 
 
-def merge_pdfs(paths, out_path, sink, progress=None, cancel=None):
-    """Concatenate PDFs strictly in the given order, keeping image streams."""
+def merge_pdfs(paths, out_path, sink, progress=None, cancel=None,
+               rebuild_outline=True):
+    """Concatenate PDFs strictly in the given order, keeping image streams.
+
+    `rebuild_outline` 会把每个分册的目录按页偏移平移到合并结果上。实测拼接后
+    总 PDF 的 /Outlines 是空的（insert_pdf 不带书签），11,334 页的交付件因此
+    完全没有导航；这里顺手补上，偏移量正好就是拼接时的累计页数。
+    """
     import pymupdf
     if progress is None:
         progress = lambda frac, label: None  # noqa: E731
@@ -1369,6 +1375,7 @@ def merge_pdfs(paths, out_path, sink, progress=None, cancel=None):
     result = pymupdf.open()
     total_pages = 0
     expected = []
+    outline = []
     try:
         for i, path in enumerate(paths, 1):
             if cancel is not None and cancel.is_set():
@@ -1385,6 +1392,14 @@ def merge_pdfs(paths, out_path, sink, progress=None, cancel=None):
                     raise RuntimeError("PDF 页数为 0：%s"
                                        % os.path.basename(path))
                 result.insert_pdf(src)
+                if rebuild_outline:
+                    try:
+                        for entry in src.get_toc(simple=True):
+                            if len(entry) >= 3 and entry[2] and entry[2] > 0:
+                                outline.append([entry[0], entry[1],
+                                                entry[2] + total_pages])
+                    except Exception:
+                        pass
                 total_pages += count
                 expected.append(count)
             finally:
@@ -1395,6 +1410,12 @@ def merge_pdfs(paths, out_path, sink, progress=None, cancel=None):
             progress(i / len(paths) * 0.9, "已拼接 %d/%d 个文件"
                      % (i, len(paths)))
         sink("正在写出合并文件，图像流保持原有编码不做重压缩…")
+        if rebuild_outline and outline:
+            try:
+                result.set_toc(outline)
+                sink("已按各分册页偏移重建书签：%d 条。" % len(outline))
+            except Exception as exc:
+                sink("书签重建失败（不影响内容）：%s" % exc)
         # Atomic publish: a crash mid-save must not leave a truncated PDF that
         # already carries the final name. The .part file is only discarded when
         # the save itself failed - removing it unconditionally here deleted the
