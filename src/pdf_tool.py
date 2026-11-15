@@ -426,7 +426,11 @@ Microsoft Word COM：本机装有 Microsoft Office 时可用，适合未安装 W
 2 GB（2,147,483,648 字节），仅作用于 WPS COM 与 Word COM 通道；WPS CLI 的 200 MB 为官方硬限制，无法在本工具内放宽。批量模式下对每个 Word 分别校验。PDF 合并不设体积上限，但超大文件合并时内存占用会上升。
 
 【使用提示】
-处理期间窗口可拖动，进度条与日志实时刷新，请不要关闭窗口直到日志出现「全部完成」。仅支持 .docx 作为转换输入；旧版 .doc / .wps 需先另存为 .docx。合并模式接受任意来源的 PDF，不要求由本工具生成。"""
+处理期间窗口可拖动，进度条与日志实时刷新，请不要关闭窗口直到日志出现「全部完成」。仅支持 .docx 作为转换输入；旧版 .doc / .wps 需先另存为 .docx。合并模式接受任意来源的 PDF，不要求由本工具生成。
+
+【授权与隐私】
+本工具源码采用 MIT 协议。但打包的 exe 内嵌了 PyMuPDF，该组件为 AGPL-3.0（或 Artifex 商业授权），因此 exe 对外分发时受 AGPL-3.0 约束，不能只以 MIT 名义交付；如需闭源商业分发，请向 Artifex 购买商业授权或更换 PDF 库。其余依赖：Pillow（MIT-CMU）、pywin32（PSF-2.0）、lxml（BSD-3-Clause）。完整说明见随包 THIRD-PARTY-NOTICES.md。
+本工具全程本地离线运行：不联网、不上传文档或图像、无遥测。中间文件只写本地临时目录，交付完成即删除。WPS Office / Microsoft Office 需自行安装并具备合法授权。"""
 
 
 # ------------------------------------------------------------------- drawing
@@ -2472,6 +2476,8 @@ def main():
             print("pillow %s" % PIL.__version__)
         except Exception as exc:
             print("pillow unavailable (%s)" % exc)
+        print("license: MIT (this project's source); bundled PyMuPDF is "
+              "AGPL-3.0 -- see THIRD-PARTY-NOTICES.md")
         return 0
     if "--selftest" in sys.argv:
         i = sys.argv.index("--selftest")
