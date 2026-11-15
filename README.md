@@ -80,6 +80,12 @@ LICENSE
 
 xlsx 走另一套 COM（WPS 表格注册的是 `KET.Application`，`KWps.Application` 没有 `Workbooks`），导出 PDF 后与 docx 同等对待。
 
+**V1.5.1 修正 JPEG 色彩空间错标**：`/DCTDecode` 流的 `/ColorSpace` 必须与 JPEG 自身分量数一致（1→`/DeviceGray`、3→`/DeviceRGB`、4→`/DeviceCMYK`）。旧代码在 JPEG 直通分支里硬编码 `/DeviceRGB`，而真实投标材料里有 895 张单通道灰度扫描件，被声明成 RGB 后：深底页整页变黑、浅底页整页变红（同一根因两种表现，取决于原图底色）。
+
+修正分三层：① 直通分支用 `jpeg_components()` 读 SOF 段按真实分量声明；② 新增 `audit_jpeg_colorspace()` 对整份 PDF 全量核对改正——这层不可省，因为错标是 WPS 带进来的，回填因尺寸不匹配而保留导出图时根本碰不到；③ `quality_check()` 加硬断言，不符即阻止删除中间稿。
+
+原有两道校验都抓不到它：画质复核只比字节（尺寸不匹配未进比对），逐页渲染审计两侧按同一错误声明解码、错得一样、差值归零。
+
 ## 快速开始
 
 ```powershell
