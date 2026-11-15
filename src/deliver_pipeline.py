@@ -118,6 +118,10 @@ class Pipeline(object):
         self.say("输出：  %s" % self.out)
 
         volumes = pf.volume_order(self.src)
+        if not volumes:
+            self.say("源目录里没有 .docx 或 .xlsx：%s" % self.src)
+            self.say("请把分册文件放进源目录后重新运行。")
+            raise RuntimeError("源目录没有可处理的 Word/Excel 分册")
         self.say("分册数：%d（docx %d / xlsx %d）" % (
             len(volumes),
             sum(1 for v in volumes if v[2] == "docx"),

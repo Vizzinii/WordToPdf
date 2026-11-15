@@ -75,7 +75,11 @@ def main():
         do_images=not args.no_images,
         do_links=not args.no_links,
         do_pages=not args.no_pages)
-    pipeline.run()
+    try:
+        pipeline.run()
+    except Exception as exc:
+        print("交付流水线未完成：%s" % exc)
+        return 1
     return 0
 
 

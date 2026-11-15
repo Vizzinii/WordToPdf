@@ -52,6 +52,8 @@ if sys.stderr is None:
 import wps_to_pdf as w2p
 import optimize_pdf_images as opt
 import link_fix
+import page_fill
+import deliver_pipeline
 
 APP_VERSION = "1.5.0"
 APP_NAME = "WordToPdfTool"
@@ -2464,6 +2466,37 @@ def main():
         no_links = ("nolinks" in sys.argv[i + 3:])
         return selftest(target, engine, keep, auto,
                         link_fix_enabled=not no_links)
+    if "--deliver" in sys.argv:
+        # 整体交付：两轮导出 → 页码回填 → 图像 → 跳转 → 合并。
+        #   --deliver --src <源目录> --out <输出目录> [--no-images] [--no-links]
+        rest = sys.argv[sys.argv.index("--deliver") + 1:]
+
+        def value_of(flag):
+            if flag in rest:
+                k = rest.index(flag)
+                if k + 1 < len(rest) and not rest[k + 1].startswith("--"):
+                    return rest[k + 1]
+            return None
+
+        src_dir = value_of("--src")
+        out_dir = value_of("--out")
+        if not src_dir or not out_dir:
+            print("usage: --deliver --src <源目录> --out <输出目录>"
+                  " [--no-images] [--no-links] [--plain]")
+            return 2
+        runner = deliver_pipeline.Pipeline(
+            src_dir, out_dir,
+            sink=lambda m: print(m, flush=True),
+            template="plain" if "--plain" in rest else "第{n}页",
+            do_images="--no-images" not in rest,
+            do_links="--no-links" not in rest,
+            do_pages="--no-pages" not in rest)
+        try:
+            runner.run()
+        except Exception as exc:
+            print("交付流水线未完成：%s" % exc)
+            return 1
+        return 0
     if "--links" in sys.argv:
         # 独立入口：对已存在的 PDF 只做跳转校验与补链，不跑转换。
         #   --links A.pdf [A.docx] [--dry-run] [--json r.json]
