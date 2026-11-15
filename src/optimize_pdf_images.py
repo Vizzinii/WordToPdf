@@ -150,6 +150,9 @@ STAT_LABELS = {
     "no_original": "无可靠同尺寸原图，保留导出图",
     "kept": "保留原样",
     "mem_skipped": "内存不足跳过",
+    "colorspace_checked": "核对色彩空间的 JPEG 数",
+    "colorspace_fixed": "色彩空间与分量不符已改正",
+    "jpeg_progressive": "渐进式 JPEG 数",
 }
 
 VERIFY_LABELS = {
@@ -807,6 +810,73 @@ def _encode_one(doc, xref, word, archive, use_g4):
     return xref, enc, enc["tag"]
 
 
+def audit_jpeg_colorspace(doc, apply_fix=True):
+    """核对每个 /DCTDecode 对象的 /ColorSpace 与 JPEG 分量数是否一致。
+
+    这一步是独立于「回填」的：回填只在匹配到 Word 原图时才改写对象，而实测
+    大量扫描件因为 WPS 导出时已缩放（原图 502x713、PDF 里 381x539），匹配不上
+    就原样保留导出图——错标的 /DeviceRGB 由 WPS 带进来，回填路径根本碰不到它。
+    所以必须在整份 PDF 上逐个对象核对。
+
+    返回 {"checked", "fixed", "progressive", "unknown"}；apply_fix=False 时只统计。
+    """
+    stats = {"checked": 0, "fixed": 0, "progressive": 0, "unknown": 0,
+             "samples": []}
+    for xref in range(1, doc.xref_length()):
+        try:
+            if doc.xref_get_key(xref, "Subtype")[1] != "/Image":
+                continue
+            filt = doc.xref_get_key(xref, "Filter")[1]
+            if "DCTDecode" not in filt:
+                continue
+        except Exception:
+            continue
+        try:
+            raw = doc.xref_stream_raw(xref) or b""
+        except Exception:
+            continue
+        comps = jpeg_components(raw)
+        if comps is None:
+            stats["unknown"] += 1
+            continue
+        stats["checked"] += 1
+        if jpeg_is_progressive(raw):
+            stats["progressive"] += 1
+        want = JPEG_COLORSPACE.get(comps)
+        if want is None:
+            stats["unknown"] += 1
+            continue
+        try:
+            current = doc.xref_get_key(xref, "ColorSpace")[1]
+        except Exception:
+            current = ""
+        if current == want:
+            continue
+        # 只纠正 DeviceXxx 系列；索引色、ICCBased 等是另一类合法写法，不碰。
+        if not (current.startswith("/Device") or current.startswith("[/")):
+            continue
+        if len(stats["samples"]) < 8:
+            stats["samples"].append((xref, comps, current[:32]))
+        if apply_fix:
+            try:
+                doc.xref_set_key(xref, "ColorSpace", want)
+                # /ColorTransform 只对 3/4 分量有意义；灰度对象上留着 1 会让
+                # 部分阅读器按 YCbCr 去解释单通道数据，同样偏色。
+                if comps == 1:
+                    try:
+                        parms = doc.xref_get_key(xref, "DecodeParms")[1]
+                    except Exception:
+                        parms = ""
+                    if parms and "ColorTransform" in parms:
+                        doc.xref_set_key(xref, "DecodeParms", "null")
+                stats["fixed"] += 1
+            except Exception:
+                pass
+        else:
+            stats["fixed"] += 1
+    return stats
+
+
 def _apply_encoding(doc, xref, enc):
     """Write one encoded stream descriptor back into the PDF.
 
@@ -881,6 +951,19 @@ def optimize(pdf_path, docx_path, out_path, use_g4=False, jobs=None,
             _apply_encoding(doc, xref, enc)
             stats[key] += 1
             del enc
+        # 回填是否命中和色彩空间是否正确是两件事：WPS 导出稿里本来就有错标的
+        # /DeviceRGB，回填匹配不上（尺寸已被缩放）时会原样留下。这里对整份
+        # PDF 的每个 DCTDecode 对象独立核对一遍分量数。
+        cs = audit_jpeg_colorspace(doc, apply_fix=True)
+        stats["colorspace_checked"] = cs["checked"]
+        stats["colorspace_fixed"] = cs["fixed"]
+        stats["jpeg_progressive"] = cs["progressive"]
+        if cs["fixed"]:
+            emit("  色彩空间纠正：%d 个 JPEG 对象的 /ColorSpace 与分量数不符，已按分量数改正"
+                 "（灰度 JPEG %d 个，其中渐进式 %d 个）"
+                 % (cs["fixed"], cs["checked"], cs["progressive"]),
+                 "  ColorSpace fixed on %d JPEG objects (%d progressive)"
+                 % (cs["fixed"], cs["progressive"]))
         emit("  正在写出优化文件 ...", "  Writing optimized PDF to disk ...")
         # use_objstms compresses the object dictionaries into /ObjStm streams and
         # deflate re-compresses the content streams. Both are structural only:
