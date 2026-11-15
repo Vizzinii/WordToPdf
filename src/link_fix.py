@@ -907,11 +907,12 @@ def format_report(report):
         for item in report.get("bad_existing") or []:
             lines.append("  既有注解异常：第 %d 页「%s」%s"
                          % (item["page"], item["text"][:20], item["why"]))
-        if report.get("inserted") is not None:
-            after = report.get("after") or {}
-            lines.append("补链结果：新增 %d 条，复核后注解 %s 个，仍缺 %s 条"
-                         % (report["inserted"], after.get("pdf_links"),
-                            after.get("missing")))
+        if report.get("after") is not None:
+            # 只有真正写过文件才有复核结果；dry-run 不该出现这一行。
+            after = report["after"]
+            lines.append("补链结果：新增 %s 条，复核后注解 %s 个，仍缺 %s 条"
+                         % (report.get("inserted"),
+                            after.get("pdf_links"), after.get("missing")))
     return lines
 
 
