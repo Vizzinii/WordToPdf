@@ -180,7 +180,10 @@ python tools\selftest.py "A.docx" --engine word
 
 ## 许可证
 
-本项目自有源码采用 **MIT**，见 `LICENSE`。
+本项目自有源码采用 **MIT**，Copyright (c) 2026 **Vizzini**，见 `LICENSE`。
+
+`LICENSE` 只放纯 MIT 正文——GitHub 的许可证识别器要求文件中不含追加段落，
+否则会把仓库标成「Other」。第三方授权因此全部写在 `THIRD-PARTY-NOTICES.md`。
 
 第三方组件另行授权，其中 **PyMuPDF 是 AGPL-3.0（或 Artifex 商业授权）**——
 打包出的 exe 内嵌了它，因此该 exe 的分发受 AGPL-3.0 约束，不能只以 MIT 名义
