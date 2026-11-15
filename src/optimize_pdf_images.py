@@ -602,6 +602,61 @@ def _truecolour_stream(im, width, height, alpha_kept=False):
             "decode": None, "decode_parms": None, "tag": "rgb_flate"}
 
 
+JPEG_COLORSPACE = {1: "/DeviceGray", 3: "/DeviceRGB", 4: "/DeviceCMYK"}
+
+
+def jpeg_components(raw):
+    """读出 JPEG 的分量数（不解码）；不是 JPEG 或结构异常时返回 None。
+
+    PDF 规范要求 /DCTDecode 流的 /ColorSpace 与 JPEG 自身分量数一致：
+        1 分量 -> /DeviceGray   3 分量 -> /DeviceRGB   4 分量 -> /DeviceCMYK
+    不一致时阅读器会按声明的色彩空间去解释字节：单通道扫描件被当成 RGB 时，
+    R 通道取到亮度、G/B 补零，浅底页整页变红、深底页整页变黑。
+    """
+    if raw[:2] != b"\xff\xd8":
+        return None
+    index, total = 2, len(raw)
+    while index < total - 9:
+        if raw[index] != 0xFF:
+            index += 1
+            continue
+        marker = raw[index + 1]
+        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+            index += 2
+            continue
+        length = (raw[index + 2] << 8) | raw[index + 3]
+        # SOF0/SOF1/SOF2 等：offset+4 精度，offset+9 分量数
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                      0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+            if index + 10 > total:
+                return None
+            return raw[index + 9]
+        index += 2 + length
+    return None
+
+
+def jpeg_is_progressive(raw):
+    """SOF2（以及 SOF6/SOF10/SOF14）是渐进式编码。"""
+    if raw[:2] != b"\xff\xd8":
+        return False
+    index, total = 2, len(raw)
+    while index < total - 9:
+        if raw[index] != 0xFF:
+            index += 1
+            continue
+        marker = raw[index + 1]
+        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+            index += 2
+            continue
+        if marker in (0xC2, 0xC6, 0xCA, 0xCE):
+            return True
+        if marker in (0xC0, 0xC1, 0xC3, 0xC5, 0xC7, 0xC9, 0xCB, 0xCD, 0xCF):
+            return False
+        length = (raw[index + 2] << 8) | raw[index + 3]
+        index += 2 + length
+    return False
+
+
 def encode_stream(raw, width, height, allow_bilevel=True, use_g4=False,
                   alpha_kept=False):
     """Build a complete PDF stream descriptor for one Word image.
@@ -618,8 +673,17 @@ def encode_stream(raw, width, height, allow_bilevel=True, use_g4=False,
         # already holds exactly those bytes; otherwise the object is a lossy
         # re-encode and a lossless stream may be both better and smaller, which
         # `_encode_one` evaluates against the stored size.
+        #
+        # The colour space must come from the JPEG's own component count, not a
+        # hard-coded /DeviceRGB: 895 of the grayscale scans in a real bid
+        # package are single-component JPEGs, and declaring them RGB turns
+        # light pages solid red and dark pages solid black.
+        comps = jpeg_components(raw)
+        colorspace = JPEG_COLORSPACE.get(comps)
+        if colorspace is None:
+            return None
         return {"data": raw, "filter": "/DCTDecode",
-                "colorspace": "/DeviceRGB", "bpc": "8",
+                "colorspace": colorspace, "bpc": "8",
                 "decode": None, "decode_parms": None,
                 "tag": "jpeg_passthrough"}
     with Image.open(io.BytesIO(raw)) as im:
