@@ -51,8 +51,9 @@ if sys.stderr is None:
 
 import wps_to_pdf as w2p
 import optimize_pdf_images as opt
+import link_fix
 
-APP_VERSION = "1.3.4"
+APP_VERSION = "1.4.0"
 APP_NAME = "WordToPdfTool"
 
 MAX_SIZE = 2 * 1024 * 1024 * 1024          # 2 GiB
@@ -356,6 +357,9 @@ ENGINE = "wps"
 MODE = "file"
 KEEP_PDF = False
 AUTO_MERGE = False
+# 图片回填完成后、合并之前，对每份交付 PDF 做一次全量跳转校验并补回缺失链接。
+# 只动 /Link 注解，不动内容流与图像流，因此不影响画质校验结论。
+LINK_FIX = True
 CANCEL = threading.Event()
 HELP_LAYOUT = {}
 _SCRATCH = None
@@ -372,6 +376,7 @@ HWND_MERGE_NAME = None
 RADIO_HWNDS = {}
 CHECK_HWND = None
 AUTO_MERGE_HWND = None
+LINK_FIX_HWND = None
 FONTS = {}
 BRUSH_BG = gdi32.CreateSolidBrush(BG)
 BRUSH_WHITE = gdi32.CreateSolidBrush(WHITE)
@@ -400,6 +405,11 @@ _HELP_TEXT = """【一句话说明】
 
 【批量自动合并】
 勾选本窗口下方的「批量完成后自动合并结果 PDF」后，文件夹批量处理结束时会把本次生成的各份最终 PDF 按处理顺序拼接为一份，输出到所选文件夹根目录，默认名为「批量合并结果.pdf」。单文件模式不触发。未勾选时，仍可随时切到「合并多个 PDF」模式自行选择文件与顺序。
+
+【跳转校验与补链】
+勾选「校验并补回 PDF 跳转」后（默认勾选），每份 PDF 在图片回填与画质审计通过之后、合并之前，会与 Word 原稿做一次全量比对：把 Word 里的每个超链接域（HYPERLINK 书签域、原生超链接）与 PDF 里实际的 /Link 注解一一配对，漏掉的按原稿目标页补回去。
+只增删 /Link 注解，不动正文内容、不动图像、不动版式，因此不影响画质结论。判定目标页的证据顺序是：同名命名目标 → 同文字其他链接已指向的页 → 书签所在标题 → 显示文字 → 编号前缀；都对不上就写进日志报告，不会猜一个页贴上去。
+纯扫描页没有文字层、显示文字过短、指向站外网址的链接，均只在报告中列出，不自动补。补链可重复执行，已存在的链接不会被重复添加。
 
 【原理说明】
 WPS 导出 PDF 时会把二值扫描图重新编码为 JPEG，既显著放大体积，又引入有损压缩。优化脚本按像素尺寸与灰度指纹逐张匹配，把 Word 原图无损回填：两色图使用 1bpp Flate，少色图使用 8bpp 索引色；文字、字体、矢量表格线与图像位置均不改动，因此是编码层面的无损重排，不是压缩率换画质。
@@ -912,7 +922,7 @@ def quality_check(out_pdf, docx, sample_pages=20, index=None):
 
 
 def run_pipeline(docx, engine, sink, keep_pdf=False, progress=None, app=None,
-                 cancel=None, no_page_check=False):
+                 cancel=None, no_page_check=False, link_fix_enabled=True):
     """Export + optimise + verify one document, then dispose of the interim PDF.
 
     `app` lets a batch reuse one hidden WPS instance instead of starting and
@@ -1000,6 +1010,23 @@ def run_pipeline(docx, engine, sink, keep_pdf=False, progress=None, app=None,
                      "不存在需要删除的中间文件。")
                 report.update({"skipped": True, "out": plain,
                                "out_size": pdf_size, "pdf_final": plain})
+                # 没有插图不等于没有目录与交叉引用：跳转校验照做。
+                if link_fix_enabled:
+                    try:
+                        sink("正在做跳转全量校验并按 Word 原稿补链…")
+                        link_report = link_fix.repair(plain, docx)
+                        report["link"] = {
+                            "fields": link_report.get("docx_fields"),
+                            "pdf_links": link_report.get("pdf_links"),
+                            "matched": link_report.get("matched"),
+                            "missing": len(link_report.get("missing") or []),
+                            "inserted": link_report.get("inserted"),
+                        }
+                        for line in link_fix.format_report(link_report):
+                            sink(line)
+                    except Exception as exc:
+                        report["link_error"] = str(exc)
+                        sink("跳转补链未完成（不影响图像与版式）：%s" % exc)
                 progress(1.0, "完成（无插图文档）")
                 return report
             os.replace(part, out)
@@ -1098,6 +1125,31 @@ def run_pipeline(docx, engine, sink, keep_pdf=False, progress=None, app=None,
             except Exception as exc:
                 verify_ok = False
                 sink("整页渲染审计未完成：%s" % exc)
+
+        # 跳转全量校验与补链。位置是刻意选的：图像已经回填、画质与整页审计
+        # 已经通过，说明这份 PDF 的「内容」是对的；此后只增删 /Link 注解，
+        # 不改内容流、不改图像流、不改版式，所以不会推翻上面的校验结论。
+        # 放在这里而不是合并之后，是为了让每份分册各自补齐——合并只是顺序拼接，
+        # 分册内部跳转在合并后仍然成立，而合并后的大文件再定位源页要重新映射。
+        if link_fix_enabled:
+            try:
+                sink("正在做跳转全量校验并按 Word 原稿补链…")
+                link_report = link_fix.repair(out, docx)
+                report["link"] = {
+                    "fields": link_report.get("docx_fields"),
+                    "pdf_links": link_report.get("pdf_links"),
+                    "matched": link_report.get("matched"),
+                    "missing": len(link_report.get("missing") or []),
+                    "inserted": link_report.get("inserted"),
+                    "unresolved": len(link_report.get("unresolved") or []),
+                    "bad_existing": len(link_report.get("bad_existing") or []),
+                }
+                for line in link_fix.format_report(link_report):
+                    sink(line)
+            except Exception as exc:
+                # 补链失败不能让已经合格的交付物作废，但必须留痕。
+                report["link_error"] = str(exc)
+                sink("跳转补链未完成（不影响图像与版式）：%s" % exc)
         progress(0.96, "校验完成")
 
         # Dispose of the interim PDF. A real pixel difference or an aborted
@@ -1196,7 +1248,8 @@ def write_batch_csv(reports, errors, folder):
     return path, None
 
 
-def run_batch(targets, engine, keep_pdf, sink, progress=None, cancel=None):
+def run_batch(targets, engine, keep_pdf, sink, progress=None, cancel=None,
+              link_fix_enabled=True):
     """Process every document; one failure must not stop the remaining ones."""
     if progress is None:
         progress = lambda frac, label: None  # noqa: E731
@@ -1251,7 +1304,8 @@ def run_batch(targets, engine, keep_pdf, sink, progress=None, cancel=None):
                 try:
                     reports.append(run_pipeline(docx, engine, sub, keep_pdf,
                                                 docprog, app=shared_app,
-                                                cancel=cancel))
+                                                cancel=cancel,
+                                                link_fix_enabled=link_fix_enabled))
                     sub("该文档处理完成。")
                     break
                 except Exception as exc:
@@ -1471,7 +1525,8 @@ def log_line(message):
             pass
 
 
-def conversion_worker(targets, engine, keep_pdf, auto_merge, merge_dir):
+def conversion_worker(targets, engine, keep_pdf, auto_merge, merge_dir,
+                      link_fix_enabled=True):
     def sink(message):
         Q.put(("log", str(message)))
         Q.put(("status", str(message)))
@@ -1483,10 +1538,15 @@ def conversion_worker(targets, engine, keep_pdf, auto_merge, merge_dir):
              % ("单个文件" if len(targets) == 1 else "文件夹批量",
                 len(targets)))
         reports, errors = run_batch(targets, engine, keep_pdf, sink, q_progress,
-                                    cancel=CANCEL)
+                                    cancel=CANCEL,
+                                    link_fix_enabled=link_fix_enabled)
         minutes = (time.time() - started) / 60
         merged = None
         if auto_merge and len(targets) > 1 and len(reports) >= 2:
+            # 分册里的跳转已在各自处理时补齐，这里只出总账，避免合并后无从追溯。
+            summary = link_fix.merge_summary(reports, link_fix_enabled)
+            if summary:
+                sink(summary)
             out = unique_output(merge_dir or os.path.dirname(
                 os.path.abspath(targets[0])), "批量合并结果.pdf")
             sink("批量处理完成，按处理顺序合并本次生成的最终 PDF…")
@@ -1770,17 +1830,17 @@ def append_log_lines(lines):
 
 
 def create_help_controls(hwnd):
-    global HWND_HELP_EDIT, CHECK_HWND, AUTO_MERGE_HWND
+    global HWND_HELP_EDIT, CHECK_HWND, AUTO_MERGE_HWND, LINK_FIX_HWND
     rc = wintypes.RECT()
     user32.GetClientRect(hwnd, ctypes.byref(rc))
     width = rc.right or HELP_W
     height = rc.bottom or HELP_H
-    # Bottom block (caption + 3 engine radios + 2 checkboxes + footer) keeps
+    # Bottom block (caption + 3 engine radios + 3 checkboxes + footer) keeps
     # its size; the help text area absorbs the difference, so the window still
-    # works on a 768-pixel-tall screen where 980 px cannot fit. 308 px is the
-    # measured height of that block (38 caption + 3*44 radios + 2*42 boxes +
+    # works on a 768-pixel-tall screen where 980 px cannot fit. 350 px is the
+    # measured height of that block (38 caption + 3*44 radios + 3*42 boxes +
     # 50 footer) plus slack.
-    block = 308
+    block = 350
     text_bottom = max(120, height - block)
     HELP_LAYOUT.update({"caption": (32, text_bottom + 4, width - 32,
                                     text_bottom + 32),
@@ -1827,6 +1887,14 @@ def create_help_controls(hwnd):
     user32.SendMessageW(check2, WM_SETFONT, FONTS["radio"], 1)
     user32.SendMessageW(check2, BM_SETCHECK, 1 if AUTO_MERGE else 0, 0)
     AUTO_MERGE_HWND = check2
+    check3 = user32.CreateWindowExW(
+        0, "BUTTON", "校验并补回 PDF 跳转（图片回填后、合并前执行，默认勾选）",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        36, HELP_LAYOUT["check_top"] + 84, width - 72, 38, hwnd,
+        ctypes.c_void_p(2103), HINST, None)
+    user32.SendMessageW(check3, WM_SETFONT, FONTS["radio"], 1)
+    user32.SendMessageW(check3, BM_SETCHECK, 1 if LINK_FIX else 0, 0)
+    LINK_FIX_HWND = check3
 
 
 def open_merge():
@@ -1944,7 +2012,8 @@ def start_job(targets, merge_dir=None):
     if log_path:
         Q.put(("log", "本次运行日志：%s" % log_path))
     threading.Thread(target=conversion_worker,
-                     args=(targets, ENGINE, KEEP_PDF, AUTO_MERGE, merge_dir),
+                     args=(targets, ENGINE, KEEP_PDF, AUTO_MERGE, merge_dir,
+                           LINK_FIX),
                      daemon=True).start()
     user32.InvalidateRect(HWND_MAIN, None, True)
 
@@ -2107,7 +2176,7 @@ def main_proc(hwnd, msg, wparam, lparam):
 
 
 def help_proc(hwnd, msg, wparam, lparam):
-    global ENGINE, KEEP_PDF, AUTO_MERGE, HWND_HELP
+    global ENGINE, KEEP_PDF, AUTO_MERGE, LINK_FIX, HWND_HELP
     if msg == WM_CREATE:
         create_help_controls(hwnd)
         return 0
@@ -2124,6 +2193,10 @@ def help_proc(hwnd, msg, wparam, lparam):
         if cid == 2102 and AUTO_MERGE_HWND:
             AUTO_MERGE = bool(user32.SendMessageW(
                 AUTO_MERGE_HWND, BM_GETCHECK, 0, 0))
+            return 0
+        if cid == 2103 and LINK_FIX_HWND:
+            LINK_FIX = bool(user32.SendMessageW(
+                LINK_FIX_HWND, BM_GETCHECK, 0, 0))
             return 0
         return 0
     if msg == WM_CTLCOLORSTATIC:
@@ -2252,7 +2325,8 @@ def merge_proc(hwnd, msg, wparam, lparam):
 
 
 # ------------------------------------------------------------------ selftest
-def selftest(target, engine, keep_pdf=False, auto_merge=False):
+def selftest(target, engine, keep_pdf=False, auto_merge=False,
+             link_fix_enabled=True):
     import tempfile
     log_path = os.path.join(tempfile.gettempdir(), "pdf_tool_selftest.log")
     lines = []
@@ -2264,9 +2338,13 @@ def selftest(target, engine, keep_pdf=False, auto_merge=False):
     started = time.time()
     targets = collect_docx(target) if os.path.isdir(target) else [target]
     lines.append("targets = %d" % len(targets))
-    reports, errors = run_batch(targets, engine, keep_pdf, sink)
+    reports, errors = run_batch(targets, engine, keep_pdf, sink,
+                                link_fix_enabled=link_fix_enabled)
     merged = None
     if auto_merge and len(reports) >= 2:
+        summary = link_fix.merge_summary(reports, link_fix_enabled)
+        if summary:
+            lines.append(summary)
         out = unique_output(os.path.abspath(target)
                             if os.path.isdir(target) else
                             os.path.dirname(os.path.abspath(target)),
@@ -2280,6 +2358,13 @@ def selftest(target, engine, keep_pdf=False, auto_merge=False):
                     "pdf_removed", "pdf_final", "keep_reason", "retained"):
             if key in report:
                 lines.append("[%d] %s = %s" % (i, key, report[key]))
+        link = report.get("link") or {}
+        for key in ("fields", "pdf_links", "matched", "missing", "inserted",
+                    "unresolved", "bad_existing"):
+            if key in link:
+                lines.append("[%d] link.%s = %s" % (i, key, link[key]))
+        if report.get("link_error"):
+            lines.append("[%d] link_error = %s" % (i, report["link_error"]))
         lines.append("[%d] out = %s" % (i, report["out"]))
         lines.append("[%d] interim_exists_after = %s"
                      % (i, os.path.exists(report["tmp"])))
@@ -2355,7 +2440,38 @@ def main():
         engine = sys.argv[i + 2] if len(sys.argv) > i + 2 else "wps"
         keep = (sys.argv[i + 3] == "keep") if len(sys.argv) > i + 3 else False
         auto = ("auto" in sys.argv[i + 3:])
-        return selftest(target, engine, keep, auto)
+        no_links = ("nolinks" in sys.argv[i + 3:])
+        return selftest(target, engine, keep, auto,
+                        link_fix_enabled=not no_links)
+    if "--links" in sys.argv:
+        # 独立入口：对已存在的 PDF 只做跳转校验与补链，不跑转换。
+        #   --links A.pdf [A.docx] [--dry-run] [--json r.json]
+        i = sys.argv.index("--links")
+        rest = sys.argv[i + 1:]
+        pdf = next((a for a in rest if a.lower().endswith(".pdf")), None)
+        docx = next((a for a in rest if a.lower().endswith(".docx")), None)
+        if not pdf:
+            print("usage: --links <A.pdf> [A.docx] [--dry-run]")
+            return 2
+        dry = "--dry-run" in rest
+        json_out = None
+        if "--json" in rest:
+            k = rest.index("--json")
+            if k + 1 < len(rest):
+                json_out = rest[k + 1]
+        if docx:
+            # repair(dry_run=True) 只分析并写 JSON，不改 PDF；分支统一走这里，
+            # 避免 --dry-run 时报告文件被悄悄丢掉。
+            report = link_fix.repair(pdf, docx, dry, json_out)
+        else:
+            report = link_fix.audit_only(pdf)
+            if json_out:
+                import json as _json
+                with open(json_out, "w", encoding="utf-8") as handle:
+                    _json.dump(report, handle, ensure_ascii=False, indent=2)
+        for line in link_fix.format_report(report):
+            print(line)
+        return 0
     if "--selftest-merge" in sys.argv:
         i = sys.argv.index("--selftest-merge")
         args = [a for a in sys.argv[i + 1:] if not a.startswith("--")]
