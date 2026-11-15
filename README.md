@@ -180,4 +180,14 @@ python tools\selftest.py "A.docx" --engine word
 
 ## 许可证
 
-MIT，见 `LICENSE`。
+本项目自有源码采用 **MIT**，见 `LICENSE`。
+
+第三方组件另行授权，其中 **PyMuPDF 是 AGPL-3.0（或 Artifex 商业授权）**——
+打包出的 exe 内嵌了它，因此该 exe 的分发受 AGPL-3.0 约束，不能只以 MIT 名义
+对外交付。其余依赖：Pillow（MIT-CMU/HPND）、pywin32（PSF-2.0）、
+lxml（BSD-3-Clause）。
+
+完整说明与分发时的建议做法见 `THIRD-PARTY-NOTICES.md`。
+
+工具本身不联网、不上传文档、无遥测；但需要目标机已安装 WPS Office 或
+Microsoft Office，其授权需自行具备。

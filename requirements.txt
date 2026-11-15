@@ -1,10 +1,19 @@
 # WordToPdfTool runtime dependencies
 #
 # Windows-only. pywin32 is required for the COM export engines; PyMuPDF does the
-# PDF parsing/writing; Pillow handles image decoding and re-encoding.
+# PDF parsing/writing; Pillow handles image decoding and re-encoding; lxml parses
+# the XML inside .docx packages (page-number tables and hyperlink fields).
 #
-# Verified against these versions (the build that shipped V1.3.3):
-#   Python 3.13, PyMuPDF 2.1, Pillow 13.0.0, pywin32 (latest for the interpreter)
+# Verified against these versions (build of V1.5.1):
+#   Python 3.11.2, PyMuPDF 2.1, Pillow 11.3.0, pywin32 311, lxml 6.0.2
+#
+# LICENSES -- read before redistributing a built executable:
+#   PyMuPDF   AGPL-3.0 or Artifex commercial  (strong copyleft; affects the exe)
+#   Pillow    MIT-CMU / HPND
+#   pywin32   PSF-2.0
+#   lxml      BSD-3-Clause
+# See THIRD-PARTY-NOTICES.md for the full explanation.
 pywin32>=306
 PyMuPDF>=1.24
 Pillow>=10.0
+lxml>=5.0

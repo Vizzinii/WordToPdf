@@ -20,14 +20,15 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----
+--------------------------------------------------------------------------------
 
-Third-party components used at runtime (installed separately, not bundled in
-this repository):
+This MIT license covers only the source code written for this project
+(src/*.py, tools/*, docs/*).
 
-  * PyMuPDF   - AGPL-3.0 (or commercial license from Artifex)
-  * Pillow    - HPND / MIT-CMU
-  * pywin32   - PSF-2.0
+It does NOT cover the third-party components bundled into the packaged
+executable. The most important is PyMuPDF, which is dual-licensed under
+AGPL-3.0 or a commercial Artifex license. A binary that embeds PyMuPDF is
+therefore subject to AGPL-3.0 terms, not MIT alone.
 
-Note that PyMuPDF's AGPL-3.0 terms may affect redistribution of binaries built
-from this source; review them before shipping a closed-source binary.
+Full details, including the other dependencies (Pillow, pywin32, lxml) and
+what to do when redistributing, are in THIRD-PARTY-NOTICES.md.
