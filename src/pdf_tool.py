@@ -55,7 +55,7 @@ import link_fix
 import page_fill
 import deliver_pipeline
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 APP_NAME = "WordToPdfTool"
 
 MAX_SIZE = 2 * 1024 * 1024 * 1024          # 2 GiB
@@ -826,7 +826,14 @@ def quality_check(out_pdf, docx, sample_pages=20, index=None):
     unmatched = 0
     failures = 0
     retained = 0
+    colorspace_bad = 0
     try:
+        # 硬断言：/DCTDecode 对象的 /ColorSpace 必须与 JPEG 分量数一致。
+        # 单通道扫描件被声明成 /DeviceRGB 时，浅底页会整页变红、深底页整页变黑，
+        # 而解码像素比对与逐页渲染审计都会「两边错得一样」而放过它——因为两者
+        # 都按流里声明的色彩空间解码。只有直接核对元数据才能发现。
+        full_cs = opt.audit_jpeg_colorspace(doc, apply_fix=False)
+        colorspace_bad = full_cs["fixed"]
         n = doc.page_count
         step = max(1, n // max(1, sample_pages))
         pages = list(range(0, n, step))[:sample_pages]
@@ -920,7 +927,7 @@ def quality_check(out_pdf, docx, sample_pages=20, index=None):
             archive.close()
     return (identical + pixel_diff + no_candidate + unmatched, identical,
             pixel_diff, no_candidate, byte_identical, failures, unmatched,
-            retained)
+            retained, colorspace_bad)
 
 
 def run_pipeline(docx, engine, sink, keep_pdf=False, progress=None, app=None,
@@ -1049,6 +1056,7 @@ def run_pipeline(docx, engine, sink, keep_pdf=False, progress=None, app=None,
         integrity_ok = True
         pixel_diff = 0
         no_candidate = 0
+        colorspace_bad = 0
         if stopped():
             raise RuntimeError("已取消")
         try:
@@ -1065,18 +1073,23 @@ def run_pipeline(docx, engine, sink, keep_pdf=False, progress=None, app=None,
             sink("完整性校验未完成：%s" % exc)
         try:
             (checked, same, pixel_diff, no_candidate,
-             byte_same, failures, unmatched, retained) = quality_check(
+             byte_same, failures, unmatched, retained,
+             colorspace_bad) = quality_check(
                 out, docx, 20, index=index)
             report.update({"checked": checked, "same": same,
                            "diff": pixel_diff, "no_candidate": no_candidate,
                            "byte_same": byte_same, "check_error": failures,
-                           "unmatched": unmatched, "retained": retained})
+                           "unmatched": unmatched, "retained": retained,
+                           "colorspace_bad": colorspace_bad})
             sink("画质复核：抽检 %d 个图像对象，与 Word 原图一致 %d"
                  "（其中 JPEG 原始字节直通 %d），像素不一致 %d，"
                  "Word 中无同尺寸原图无法比对 %d，"
                  "匹配超阈值未替换 %d，为省体积保留原 JPEG %d。"
                  % (checked, same, byte_same, pixel_diff, no_candidate,
                     unmatched, retained))
+            if colorspace_bad:
+                sink("⚠ 色彩空间复核：%d 个 JPEG 对象的 /ColorSpace 与自身"
+                     "分量数不符，单通道扫描件会被渲染成红底或黑块。" % colorspace_bad)
             if failures:
                 sink("有 %d 个对象在复核时读取失败，单独计入「复核异常」，"
                      "不计作画质差异。" % failures)
@@ -1167,6 +1180,9 @@ def run_pipeline(docx, engine, sink, keep_pdf=False, progress=None, app=None,
             reasons.append("完整性校验三项不一致")
         if pixel_diff > 0:
             reasons.append("画质复核存在 %d 张真实像素差异" % pixel_diff)
+        if colorspace_bad:
+            reasons.append("色彩空间复核有 %d 个 JPEG 对象声明与分量数不符"
+                           % colorspace_bad)
         if page_flagged:
             reasons.append("整页渲染审计有 %d 页结构性差异（第 %s 页）"
                            % (len(page_flagged),
